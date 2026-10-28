@@ -1,0 +1,8 @@
+{
+  "prompt": "slow cinematic dolly-in as the astronaut walks forward steadily through drifting dust, suit fabric shifting with each step, visor catching the low golden sun, subtle handheld camera sway, dust motes floating in backlight, shallow depth of field, anamorphic 35mm, film grain",
+  "model": "seedance-2.5-image-to-video",
+  "image_path": "media-shots/shot2_medium.png",
+  "aspect_ratio": "adaptive",
+  "duration": 5,
+  "params": { "high_bitrate": true }
+}
