@@ -125,38 +125,55 @@ def make_title_card(width, height, title, subtitle, out_png):
     return out_png
 
 
-def grade_and_titles(ffmpeg, src, out_path, total, width, height, title, subtitle, workdir):
-    fade_out_start = max(0.0, total - 0.9)
-    base = f"noise=alls=7:allf=t+u,vignette=PI/5"
+def make_title_frame(source_image, width, height, title, subtitle, out_png):
+    """Готовит кадр-титр: затемнённый первый кадр + надписи (без drawtext/overlay)."""
+    from PIL import Image, ImageDraw, ImageFont, ImageEnhance  # noqa: WPS433
 
-    title_png = None
-    if title or subtitle:
-        title_png = make_title_card(width, height, title, subtitle,
-                                    os.path.join(workdir, "title.png"))
+    img = Image.open(source_image).convert("RGB")
+    img = img.resize((width, height), Image.LANCZOS)
+    img = ImageEnhance.Brightness(img).enhance(0.45)
+    img = ImageEnhance.Color(img).enhance(0.8)
+    draw = ImageDraw.Draw(img)
 
-    if title_png:
-        # Титр плавно появляется на 0.9с и уходит к 4.4с
-        fade_in, hold_from, hold_to, fade_out = 0.9, 1.6, 3.6, 4.4
-        vf = (
-            f"[0:v]{base}[base];"
-            f"[1:v]format=rgba,"
-            f"fade=t=in:st={fade_in}:d={hold_from - fade_in:.2f}:alpha=1,"
-            f"fade=t=out:st={hold_to}:d={fade_out - hold_to:.2f}:alpha=1[t];"
-            f"[base][t]overlay=0:0,fade=t=in:st=0:d=0.8,"
-            f"fade=t=out:st={fade_out_start:.2f}:d=0.9[vout]"
-        )
-        cmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
-               "-i", src, "-loop", "1", "-i", title_png,
-               "-filter_complex", vf, "-map", "[vout]", "-an",
-               "-c:v", "libx264", "-preset", "slow", "-crf", "20",
-               "-pix_fmt", "yuv420p", "-movflags", "+faststart", out_path]
+    def load(size, bold):
+        name = "DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf"
+        for base in ("/usr/share/fonts/truetype/dejavu", "/usr/share/fonts/dejavu"):
+            path = os.path.join(base, name)
+            if os.path.exists(path):
+                return ImageFont.truetype(path, size)
+        return ImageFont.load_default()
+
+    def center(text, font, y, fill):
+        left, top, right, bottom = draw.textbbox((0, 0), text, font=font)
+        x = (width - (right - left)) / 2 - left
+        draw.text((x + 2, y + 2), text, font=font, fill=(0, 0, 0))
+        draw.text((x, y), text, font=font, fill=fill)
+        return bottom - top
+
+    if title:
+        th = center("  ".join(title.upper()), load(int(height * 0.075), True),
+                    int(height * 0.44), (245, 242, 235))
     else:
-        vf = (f"{base},fade=t=in:st=0:d=0.8,"
-              f"fade=t=out:st={fade_out_start:.2f}:d=0.9")
-        cmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-i", src,
-               "-vf", vf, "-an", "-c:v", "libx264", "-preset", "slow", "-crf", "20",
-               "-pix_fmt", "yuv420p", "-movflags", "+faststart", out_path]
+        th = 0
+    if subtitle:
+        center(subtitle, load(int(height * 0.028), False),
+               int(height * 0.44) + th + int(height * 0.045), (220, 214, 202))
 
+    img.save(out_png)
+    return out_png
+
+
+def grade_and_titles(ffmpeg, src, out_path, total, width, height, title, subtitle, workdir,
+                     grain=0, preset="medium"):
+    fade_out_start = max(0.0, total - 0.9)
+    base = "vignette=PI/5"
+    if grain > 0:
+        base = f"noise=alls={grain}:allf=t+u," + base
+
+    vf = f"{base},fade=t=in:st=0:d=0.8,fade=t=out:st={fade_out_start:.2f}:d=0.9"
+    cmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-i", src,
+           "-vf", vf, "-an", "-c:v", "libx264", "-preset", preset, "-crf", "20",
+           "-pix_fmt", "yuv420p", "-movflags", "+faststart", out_path]
     subprocess.run(cmd, check=True)
     return out_path
 
@@ -169,6 +186,10 @@ def main():
     parser.add_argument("--height", type=int, default=1440)
     parser.add_argument("--title", default="")
     parser.add_argument("--subtitle", default="")
+    parser.add_argument("--grain", type=int, default=0,
+                        help="сила зерна 0-20 (дорого по CPU, 0 = выключено)")
+    parser.add_argument("--preset", default="medium",
+                        help="x264 preset: ultrafast..slow")
     args = parser.parse_args()
 
     ffmpeg = find_ffmpeg()
@@ -180,7 +201,7 @@ def main():
     if not shots:
         sys.exit(f"В {args.shots_dir} нет изображений")
 
-    plan = [("in", 0.06, 5.0), ("in", 0.10, 4.0), ("in", 0.08, 3.0), ("out", 0.10, 4.5)]
+    plan = [("in", 0.05, 3.0), ("in", 0.06, 5.0), ("in", 0.10, 4.0), ("in", 0.08, 3.0), ("out", 0.10, 4.5)]
     while len(plan) < len(shots):
         plan.append(("in", 0.06, 4.0))
     plan = plan[: len(shots)]
@@ -188,9 +209,19 @@ def main():
     os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
     with tempfile.TemporaryDirectory() as tmp:
         clips, durations = [], []
-        for i, (shot, (direction, amount, duration)) in enumerate(zip(shots, plan)):
+        if args.title or args.subtitle:
+            title_png = make_title_frame(shots[0], args.width, args.height,
+                                         args.title, args.subtitle,
+                                         os.path.join(tmp, "title.png"))
+            clip = os.path.join(tmp, "scene_title.mp4")
+            print("[0] title card", flush=True)
+            build_scene(ffmpeg, title_png, clip, args.width, args.height, 3.0, "in", 0.05)
+            clips.append(clip)
+            durations.append(3.0)
+
+        for i, (shot, (direction, amount, duration)) in enumerate(zip(shots, plan[1:])):
             clip = os.path.join(tmp, f"scene{i}.mp4")
-            print(f"[{i + 1}/{len(shots)}] {os.path.basename(shot)} {direction} {amount} {duration}s")
+            print(f"[{i + 1}/{len(shots)}] {os.path.basename(shot)} {direction} {amount} {duration}s", flush=True)
             build_scene(ffmpeg, shot, clip, args.width, args.height, duration, direction, amount)
             clips.append(clip)
             durations.append(duration)
@@ -199,10 +230,11 @@ def main():
         concat_with_xfade(ffmpeg, clips, durations, stitched, tmp, args.width, args.height)
         total = sum(durations) - TRANSITION * (len(clips) - 1)
 
-        print(f"grade + titles -> {args.output} ({total:.1f}s)")
+        print(f"grade + titles -> {args.output} ({total:.1f}s)", flush=True)
         grade_and_titles(
             ffmpeg, stitched, args.output, total, args.width, args.height,
             args.title, args.subtitle, tmp,
+            grain=args.grain, preset=args.preset,
         )
 
     size = os.path.getsize(args.output) / 1e6

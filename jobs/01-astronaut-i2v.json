@@ -4,5 +4,8 @@
   "image_url": "https://raw.githubusercontent.com/shorzyEZ/Open-Generative-AI/arena/c544e7eb-open-generative-ai/media-shots/shot2_medium.png",
   "aspect_ratio": "adaptive",
   "duration": 5,
-  "params": { "high_bitrate": true }
+  "params": {
+    "high_bitrate": true
+  },
+  "_comment": "Blocked: MuAPI returned 402 INSUFFICIENT_CREDITS. Top up at https://muapi.ai/topup ($10 min) and re-run this job."
 }
