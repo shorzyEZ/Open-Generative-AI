@@ -36,3 +36,7 @@ out/
 .env
 .env.*
 !.env.example
+
+# Локальные рендеры (видео/превью не место в git — для этого есть ветка media)
+output/
+media-shots/*.mp4

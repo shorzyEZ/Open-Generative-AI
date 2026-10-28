@@ -7,5 +7,6 @@
   "params": {
     "high_bitrate": true
   },
-  "_comment": "Blocked: MuAPI returned 402 INSUFFICIENT_CREDITS. Top up at https://muapi.ai/topup ($10 min) and re-run this job."
+  "_comment": "Blocked by MuAPI HTTP 402 INSUFFICIENT_CREDITS. Top up at https://muapi.ai/topup ($10 min), then push this file again to run it.",
+  "_updated": "2026-10-28"
 }
