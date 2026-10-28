@@ -39,6 +39,11 @@ on:
         required: false
         default: ""
         type: string
+      image_url:
+        description: "Public URL of a start frame (alternative to image_path)"
+        required: false
+        default: ""
+        type: string
       generate_audio:
         description: "Native audio"
         required: false
@@ -83,6 +88,7 @@ jobs:
       INPUT_DURATION: ${{ inputs.duration }}
       INPUT_RESOLUTION: ${{ inputs.resolution }}
       INPUT_IMAGE_PATH: ${{ inputs.image_path }}
+      INPUT_IMAGE_URL: ${{ inputs.image_url }}
       INPUT_GENERATE_AUDIO: ${{ inputs.generate_audio }}
       INPUT_SEED: ${{ inputs.seed }}
       INPUT_DRY_RUN: ${{ inputs.dry_run }}
@@ -124,11 +130,12 @@ jobs:
               --arg d "${INPUT_DURATION:-}" \
               --arg r "${INPUT_RESOLUTION:-}" \
               --arg i "${INPUT_IMAGE_PATH:-}" \
+              --arg iu "${INPUT_IMAGE_URL:-}" \
               --arg a "${INPUT_GENERATE_AUDIO:-}" \
               --arg s "${INPUT_SEED:-}" \
               --argjson dry "${INPUT_DRY_RUN:-false}" \
               '{prompt:$p, model:$m, aspect_ratio:$ar, duration:$d,
-                resolution:$r, image_path:$i, generate_audio:$a, seed:$s,
+                resolution:$r, image_path:$i, image_url:$iu, generate_audio:$a, seed:$s,
                 dry_run:$dry}' > request.raw.json
           else
             file=$(git show --name-only --pretty=format: HEAD | grep -E '^jobs/.*\.json$' | head -n1 || true)
@@ -147,6 +154,7 @@ jobs:
             duration:      ((.duration // "") | tostring),
             resolution:    (.resolution // ""),
             image_path:    (.image_path // ""),
+            image_url:     (.image_url // ""),
             generate_audio:(if .generate_audio == null then "default" else (.generate_audio | tostring) end),
             seed:          ((.seed // "") | tostring),
             dry_run:       (.dry_run // false),
@@ -179,8 +187,10 @@ jobs:
           AUDIO=$(jq -r '.generate_audio' request.json)
           SEED=$(jq -r '.seed' request.json)
 
-          IMAGE_URL=""
-          if [ -n "${IMAGE_PATH}" ]; then
+          IMAGE_URL=$(jq -r '.image_url' request.json)
+          if [ -n "${IMAGE_URL}" ]; then
+            echo "Using provided public image URL: ${IMAGE_URL}"
+          elif [ -n "${IMAGE_PATH}" ]; then
             if [ ! -f "${IMAGE_PATH}" ]; then
               echo "::error::Start frame not found in repo: ${IMAGE_PATH}"
               exit 1
@@ -191,9 +201,9 @@ jobs:
               -H "x-api-key: ${MUAPI_API_KEY}" \
               -F "file=@${IMAGE_PATH}")
             echo "upload HTTP ${code}"; cat upload.json; echo
-            [ "${code}" = "200" ] || { echo "::error::Upload failed"; exit 1; }
+            [ "${code}" = "200" ] || { echo "::error::Upload failed: HTTP ${code} $(head -c 300 upload.json | tr '\n' ' ')"; exit 1; }
             IMAGE_URL=$(jq -r '.url // .file_url // .data.url // empty' upload.json)
-            [ -n "${IMAGE_URL}" ] || { echo "::error::No url in upload response"; exit 1; }
+            [ -n "${IMAGE_URL}" ] || { echo "::error::No url in upload response: $(head -c 300 upload.json)"; exit 1; }
           fi
 
           DUR_JSON=$(jq -n --arg d "${DURATION}" 'if $d == "" then null else ($d | tonumber) end')
@@ -228,10 +238,10 @@ jobs:
             -H "x-api-key: ${MUAPI_API_KEY}" \
             -d @payload.final.json)
           echo "submit HTTP ${code}"; cat submit.json; echo
-          [ "${code}" = "200" ] || [ "${code}" = "201" ] || { echo "::error::Submit failed (HTTP ${code})"; exit 1; }
+          [ "${code}" = "200" ] || [ "${code}" = "201" ] || { echo "::error::Submit failed (HTTP ${code}): $(head -c 400 submit.json | tr '\n' ' ')"; exit 1; }
 
           REQUEST_ID=$(jq -r '.request_id // .id // empty' submit.json)
-          [ -n "${REQUEST_ID}" ] || { echo "::error::No request_id in response"; exit 1; }
+          [ -n "${REQUEST_ID}" ] || { echo "::error::No request_id in response: $(head -c 400 submit.json | tr '\n' ' ')"; exit 1; }
           echo "REQUEST_ID=${REQUEST_ID}" >> "$GITHUB_ENV"
           echo "Submitted: ${REQUEST_ID}"
 
