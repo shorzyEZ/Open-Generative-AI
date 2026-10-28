@@ -1,6 +1,0 @@
-{
-  "prompt": "smoke test - will fail fast if the MUAPI_API_KEY secret is missing",
-  "model": "seedance-2.5-text-to-video",
-  "aspect_ratio": "16:9",
-  "duration": 5
-}
