@@ -53,6 +53,11 @@ on:
         required: false
         default: ""
         type: string
+      dry_run:
+        description: "Only validate the API key (spends no credits)"
+        required: false
+        default: false
+        type: boolean
   push:
     paths:
       - "jobs/*.json"
@@ -80,6 +85,8 @@ jobs:
       INPUT_IMAGE_PATH: ${{ inputs.image_path }}
       INPUT_GENERATE_AUDIO: ${{ inputs.generate_audio }}
       INPUT_SEED: ${{ inputs.seed }}
+      INPUT_DRY_RUN: ${{ inputs.dry_run }}
+      DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
 
     steps:
       - name: Checkout
@@ -119,8 +126,10 @@ jobs:
               --arg i "${INPUT_IMAGE_PATH:-}" \
               --arg a "${INPUT_GENERATE_AUDIO:-}" \
               --arg s "${INPUT_SEED:-}" \
+              --argjson dry "${INPUT_DRY_RUN:-false}" \
               '{prompt:$p, model:$m, aspect_ratio:$ar, duration:$d,
-                resolution:$r, image_path:$i, generate_audio:$a, seed:$s}' > request.raw.json
+                resolution:$r, image_path:$i, generate_audio:$a, seed:$s,
+                dry_run:$dry}' > request.raw.json
           else
             file=$(git show --name-only --pretty=format: HEAD | grep -E '^jobs/.*\.json$' | head -n1 || true)
             if [ -z "${file}" ]; then
@@ -140,18 +149,25 @@ jobs:
             image_path:    (.image_path // ""),
             generate_audio:(if .generate_audio == null then "default" else (.generate_audio | tostring) end),
             seed:          ((.seed // "") | tostring),
+            dry_run:       (.dry_run // false),
             params:        (.params // {})
           }' request.raw.json > request.json
 
           cat request.json
           PROMPT=$(jq -r '.prompt' request.json)
           IMAGE_PATH=$(jq -r '.image_path' request.json)
-          if [ -z "${PROMPT}" ] && [ -z "${IMAGE_PATH}" ]; then
+          DRY_RUN=$(jq -r '.dry_run // false' request.json)
+          echo "DRY_RUN=${DRY_RUN}" >> "$GITHUB_ENV"
+          if [ "${DRY_RUN}" = "true" ]; then
+            echo "DRY RUN: API key accepted by MuAPI — no generation submitted, zero credits spent."
+          fi
+          if [ -z "${PROMPT}" ] && [ -z "${IMAGE_PATH}" ] && [ "${DRY_RUN}" != "true" ]; then
             echo "::error::Empty prompt: refusing to spend credits."
             exit 1
           fi
 
       - name: Submit generation
+        if: env.DRY_RUN != 'true'
         run: |
           set -euo pipefail
           PROMPT=$(jq -r '.prompt' request.json)
@@ -220,6 +236,7 @@ jobs:
           echo "Submitted: ${REQUEST_ID}"
 
       - name: Poll for result
+        if: env.DRY_RUN != 'true'
         run: |
           set -euo pipefail
           echo "Waiting for ${REQUEST_ID} ..."
@@ -246,6 +263,7 @@ jobs:
           exit 1
 
       - name: Download video
+        if: env.DRY_RUN != 'true'
         run: |
           set -euo pipefail
           VIDEO_URL=$(jq -r '
@@ -288,6 +306,7 @@ jobs:
             > "out/${NAME}.json"
 
       - name: Publish to media branch
+        if: env.DRY_RUN != 'true'
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
@@ -321,4 +340,8 @@ jobs:
             echo "- request: \`${REQUEST_ID:-none}\`"
             echo "- output: \`media:generated/${NAME:-none}.mp4\`"
             echo "- source url: ${VIDEO_URL:-none}"
+            if [ "${DRY_RUN:-false}" = "true" ]; then
+              echo ""
+              echo "**Dry run:** ключ принят, генерация не запускалась, кредиты не потрачены."
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
