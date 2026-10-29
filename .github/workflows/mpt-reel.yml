@@ -126,6 +126,14 @@ jobs:
             --subtitle-position "${POSITION}" \
             --subtitle-display-mode "sentence" \
             --stop-at "video" 2>&1 | tee ../mpt.log
+          STATUS=${PIPESTATUS[0]}
+          if [ "${STATUS}" -ne 0 ]; then
+            echo "::error::MPT CLI exit=${STATUS}"
+            grep -aE "ERROR|Traceback|task failed|failed to|Error:" ../mpt.log | tail -8 | while IFS= read -r line; do
+              echo "::error::${line:0:400}"
+            done
+            exit 1
+          fi
 
           VIDEO=$(find storage/tasks -name "final-*.mp4" -newermt '-30 minutes' | head -n1)
           [ -n "${VIDEO}" ] || VIDEO=$(find storage/tasks -name "final-*.mp4" | head -n1)
