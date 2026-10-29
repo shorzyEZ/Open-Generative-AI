@@ -67,14 +67,14 @@ jobs:
       - name: Clone MoneyPrinterTurbo
         run: |
           set -euo pipefail
-          git clone --depth 1 https://github.com/harry0703/MoneyPrinterTurbo.git mpt
-          cd mpt
+          git clone --depth 1 https://github.com/harry0703/MoneyPrinterTurbo.git mpt-src
+          cd mpt-src
           git log -1 --format='MPT commit: %h %s'
 
       - name: Install MPT deps
         run: |
           set -euo pipefail
-          cd mpt
+          cd mpt-src
           python -m pip install --quiet --upgrade pip
           python -m pip install --quiet -r requirements.txt
           python -c "import moviepy, edge_tts, toml; print('deps ok')"
@@ -82,7 +82,7 @@ jobs:
       - name: Configure
         run: |
           set -euo pipefail
-          cd mpt
+          cd mpt-src
           cp config.example.toml config.toml
           # субтитры по таймкодам Edge TTS (Whisper не скачивается), источник — локальные файлы
           sed -i 's/^subtitle_provider.*/subtitle_provider = "edge"/' config.toml
@@ -92,7 +92,7 @@ jobs:
       - name: Render reel
         run: |
           set -euo pipefail
-          cd mpt
+          cd mpt-src
           SCRIPT=$(jq -r '.script' ../job.json)
           SUBJECT=$(jq -r '.subject // .name' ../job.json)
           VOICE=$(jq -r '.voice // "ru-RU-DmitryNeural-Male"' ../job.json)
