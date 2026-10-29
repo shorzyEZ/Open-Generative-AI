@@ -159,6 +159,31 @@ jobs:
           git remote set-url origin "https://x-access-token:${GITHUB_TOKEN_ACTIONS}@github.com/${GITHUB_REPOSITORY}.git"
           git push origin media
 
+      - name: Publish log on failure
+        if: failure()
+        run: |
+          set -uo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git fetch --depth=1 origin media 2>/dev/null; then
+            git checkout -B media FETCH_HEAD
+          else
+            git checkout --orphan media
+            find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+            echo "# Generated media" > README.md
+          fi
+          mkdir -p generated
+          {
+            echo "run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo "job: $(jq -c . job.json 2>/dev/null || echo '?')"
+            echo "--- mpt.log (tail 200) ---"
+            tail -200 mpt.log 2>/dev/null || echo "(mpt.log отсутствует)"
+          } > "generated/${NAME:-reel}.log"
+          git add generated README.md
+          git commit -m "mpt: log for ${NAME:-reel} (failed)" || true
+          git remote set-url origin "https://x-access-token:${GITHUB_TOKEN_ACTIONS}@github.com/${GITHUB_REPOSITORY}.git"
+          git push origin media || true
+
       - name: Summary
         if: always()
         run: |
