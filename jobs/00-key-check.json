@@ -1,0 +1,7 @@
+{
+  "_comment": "Free validation: checks the MUAPI_API_KEY secret, spends no credits.",
+  "prompt": "validation only",
+  "model": "seedance-2.5-text-to-video",
+  "dry_run": true,
+  "_run": "2026-10-28T17:40:10Z"
+}

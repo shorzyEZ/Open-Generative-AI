@@ -1,0 +1,12 @@
+{
+  "_comment": "Copy to jobs/<name>.json and push. Every push that touches jobs/*.json starts .github/workflows/generate-video.yml",
+  "prompt": "A cinematic low-angle tracking shot of a lone astronaut walking across black volcanic sand, dust drifting in golden backlight, shallow depth of field, slow dolly-in, shot on 35mm anamorphic, subtle film grain",
+  "model": "seedance-2.5-text-to-video",
+  "aspect_ratio": "16:9",
+  "duration": 5,
+  "resolution": null,
+  "image_path": null,
+  "generate_audio": null,
+  "seed": null,
+  "params": {}
+}

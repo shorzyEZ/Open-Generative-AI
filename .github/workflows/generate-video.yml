@@ -1,0 +1,357 @@
+name: Generate video
+
+# Two ways to trigger:
+#   1. Push a request file to jobs/*.json  (used by the agent from chat)
+#   2. Actions -> Generate video -> Run workflow  (manual UI)
+#
+# Requires repository secret: MUAPI_API_KEY  (https://muapi.ai/access-keys)
+# Results are committed to the `media` branch under generated/.
+
+on:
+  workflow_dispatch:
+    inputs:
+      prompt:
+        description: "Prompt (English works best)"
+        required: true
+        type: string
+      model:
+        description: "MuAPI model id / endpoint"
+        required: false
+        default: "seedance-2.5-text-to-video"
+        type: string
+      aspect_ratio:
+        description: "16:9 | 9:16 | 1:1 | 4:3 | 3:4 | 21:9 (empty = model default)"
+        required: false
+        default: "16:9"
+        type: string
+      duration:
+        description: "Seconds (empty = model default)"
+        required: false
+        default: "5"
+        type: string
+      resolution:
+        description: "e.g. 720p / 1080p / 4k (empty = model default)"
+        required: false
+        default: ""
+        type: string
+      image_path:
+        description: "Repo path to a start frame, for image-to-video (optional)"
+        required: false
+        default: ""
+        type: string
+      image_url:
+        description: "Public URL of a start frame (alternative to image_path)"
+        required: false
+        default: ""
+        type: string
+      generate_audio:
+        description: "Native audio"
+        required: false
+        default: "default"
+        type: choice
+        options:
+          - default
+          - "true"
+          - "false"
+      seed:
+        description: "Seed (empty = random)"
+        required: false
+        default: ""
+        type: string
+      dry_run:
+        description: "Only validate the API key (spends no credits)"
+        required: false
+        default: false
+        type: boolean
+  push:
+    paths:
+      - "jobs/*.json"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: generate-video
+  cancel-in-progress: false
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      MUAPI_BASE: https://api.muapi.ai
+      MUAPI_API_KEY: ${{ secrets.MUAPI_API_KEY }}
+      GITHUB_TOKEN_ACTIONS: ${{ github.token }}
+      INPUT_PROMPT: ${{ inputs.prompt }}
+      INPUT_MODEL: ${{ inputs.model }}
+      INPUT_ASPECT_RATIO: ${{ inputs.aspect_ratio }}
+      INPUT_DURATION: ${{ inputs.duration }}
+      INPUT_RESOLUTION: ${{ inputs.resolution }}
+      INPUT_IMAGE_PATH: ${{ inputs.image_path }}
+      INPUT_IMAGE_URL: ${{ inputs.image_url }}
+      INPUT_GENERATE_AUDIO: ${{ inputs.generate_audio }}
+      INPUT_SEED: ${{ inputs.seed }}
+      INPUT_DRY_RUN: ${{ inputs.dry_run }}
+      DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Check API key
+        run: |
+          set -euo pipefail
+          if [ -z "${MUAPI_API_KEY:-}" ]; then
+            echo "::error::Repository secret MUAPI_API_KEY is not set. Add it in Settings -> Secrets and variables -> Actions. Get a key at https://muapi.ai/access-keys"
+            exit 1
+          fi
+          code=$(curl -sS -o balance.json -w '%{http_code}' \
+            --max-time 60 \
+            -H "x-api-key: ${MUAPI_API_KEY}" \
+            "${MUAPI_BASE}/api/v1/account/balance" || echo "000")
+          echo "balance HTTP ${code}"
+          head -c 500 balance.json 2>/dev/null || true
+          echo
+          if [ "${code}" != "200" ]; then
+            echo "::error::MuAPI rejected the key (HTTP ${code}). Check that the secret contains the key VALUE, not its label."
+            exit 1
+          fi
+
+      - name: Build request
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            jq -n \
+              --arg p "${INPUT_PROMPT:-}" \
+              --arg m "${INPUT_MODEL:-}" \
+              --arg ar "${INPUT_ASPECT_RATIO:-}" \
+              --arg d "${INPUT_DURATION:-}" \
+              --arg r "${INPUT_RESOLUTION:-}" \
+              --arg i "${INPUT_IMAGE_PATH:-}" \
+              --arg iu "${INPUT_IMAGE_URL:-}" \
+              --arg a "${INPUT_GENERATE_AUDIO:-}" \
+              --arg s "${INPUT_SEED:-}" \
+              --argjson dry "${INPUT_DRY_RUN:-false}" \
+              '{prompt:$p, model:$m, aspect_ratio:$ar, duration:$d,
+                resolution:$r, image_path:$i, image_url:$iu, generate_audio:$a, seed:$s,
+                dry_run:$dry}' > request.raw.json
+          else
+            file=$(git show --name-only --pretty=format: HEAD | grep -E '^jobs/.*\.json$' | head -n1 || true)
+            if [ -z "${file}" ]; then
+              echo "::error::No jobs/*.json file found in this push."
+              exit 1
+            fi
+            echo "Job file: ${file}"
+            cp "${file}" request.raw.json
+          fi
+
+          jq '{
+            prompt:        (.prompt // ""),
+            model:         (.model // "seedance-2.5-text-to-video"),
+            aspect_ratio:  (.aspect_ratio // ""),
+            duration:      ((.duration // "") | tostring),
+            resolution:    (.resolution // ""),
+            image_path:    (.image_path // ""),
+            image_url:     (.image_url // ""),
+            generate_audio:(if .generate_audio == null then "default" else (.generate_audio | tostring) end),
+            seed:          ((.seed // "") | tostring),
+            dry_run:       (.dry_run // false),
+            params:        (.params // {})
+          }' request.raw.json > request.json
+
+          cat request.json
+          PROMPT=$(jq -r '.prompt' request.json)
+          IMAGE_PATH=$(jq -r '.image_path' request.json)
+          DRY_RUN=$(jq -r '.dry_run // false' request.json)
+          echo "DRY_RUN=${DRY_RUN}" >> "$GITHUB_ENV"
+          if [ "${DRY_RUN}" = "true" ]; then
+            echo "DRY RUN: API key accepted by MuAPI — no generation submitted, zero credits spent."
+          fi
+          if [ -z "${PROMPT}" ] && [ -z "${IMAGE_PATH}" ] && [ "${DRY_RUN}" != "true" ]; then
+            echo "::error::Empty prompt: refusing to spend credits."
+            exit 1
+          fi
+
+      - name: Submit generation
+        if: env.DRY_RUN != 'true'
+        run: |
+          set -euo pipefail
+          PROMPT=$(jq -r '.prompt' request.json)
+          MODEL=$(jq -r '.model' request.json)
+          ASPECT=$(jq -r '.aspect_ratio' request.json)
+          DURATION=$(jq -r '.duration' request.json)
+          RESOLUTION=$(jq -r '.resolution' request.json)
+          IMAGE_PATH=$(jq -r '.image_path' request.json)
+          AUDIO=$(jq -r '.generate_audio' request.json)
+          SEED=$(jq -r '.seed' request.json)
+
+          IMAGE_URL=$(jq -r '.image_url' request.json)
+          if [ -n "${IMAGE_URL}" ]; then
+            echo "Using provided public image URL: ${IMAGE_URL}"
+          elif [ -n "${IMAGE_PATH}" ]; then
+            if [ ! -f "${IMAGE_PATH}" ]; then
+              echo "::error::Start frame not found in repo: ${IMAGE_PATH}"
+              exit 1
+            fi
+            echo "Uploading ${IMAGE_PATH} ..."
+            code=$(curl -sS -o upload.json -w '%{http_code}' --max-time 300 \
+              -X POST "${MUAPI_BASE}/api/v1/upload_file" \
+              -H "x-api-key: ${MUAPI_API_KEY}" \
+              -F "file=@${IMAGE_PATH}")
+            echo "upload HTTP ${code}"; cat upload.json; echo
+            [ "${code}" = "200" ] || { echo "::error::Upload failed: HTTP ${code} $(head -c 300 upload.json | tr '\n' ' ')"; exit 1; }
+            IMAGE_URL=$(jq -r '.url // .file_url // .data.url // empty' upload.json)
+            [ -n "${IMAGE_URL}" ] || { echo "::error::No url in upload response: $(head -c 300 upload.json)"; exit 1; }
+          fi
+
+          DUR_JSON=$(jq -n --arg d "${DURATION}" 'if $d == "" then null else ($d | tonumber) end')
+          SEED_JSON=$(jq -n --arg s "${SEED}" 'if $s == "" then null else ($s | tonumber) end')
+
+          jq -n \
+            --arg prompt "${PROMPT}" \
+            --arg aspect_ratio "${ASPECT}" \
+            --arg resolution "${RESOLUTION}" \
+            --arg image_url "${IMAGE_URL}" \
+            --arg audio "${AUDIO}" \
+            --argjson duration "${DUR_JSON}" \
+            --argjson seed "${SEED_JSON}" '
+            ({prompt: $prompt}
+             + (if $aspect_ratio != "" then {aspect_ratio: $aspect_ratio} else {} end)
+             + (if $resolution   != "" then {resolution:   $resolution}   else {} end)
+             + (if $image_url    != "" then {image_url:    $image_url}    else {} end)
+             + (if $duration     != null then {duration:   $duration}     else {} end)
+             + (if $seed         != null then {seed:       $seed}         else {} end)
+             + (if $audio == "true"  then {generate_audio: true}  else {} end)
+             + (if $audio == "false" then {generate_audio: false} else {} end)
+            )' > payload.json
+
+          # Escape hatch: extra raw parameters from the job file
+          jq -s '.[0] * (.[1].params // {})' payload.json request.json > payload.final.json
+          echo "--- payload ---"; cat payload.final.json; echo
+          echo "MODEL=${MODEL}" >> "$GITHUB_ENV"
+
+          code=$(curl -sS -o submit.json -w '%{http_code}' --max-time 120 \
+            -X POST "${MUAPI_BASE}/api/v1/${MODEL}" \
+            -H "Content-Type: application/json" \
+            -H "x-api-key: ${MUAPI_API_KEY}" \
+            -d @payload.final.json)
+          echo "submit HTTP ${code}"; cat submit.json; echo
+          [ "${code}" = "200" ] || [ "${code}" = "201" ] || { echo "::error::Submit failed (HTTP ${code}): $(head -c 400 submit.json | tr '\n' ' ')"; exit 1; }
+
+          REQUEST_ID=$(jq -r '.request_id // .id // empty' submit.json)
+          [ -n "${REQUEST_ID}" ] || { echo "::error::No request_id in response: $(head -c 400 submit.json | tr '\n' ' ')"; exit 1; }
+          echo "REQUEST_ID=${REQUEST_ID}" >> "$GITHUB_ENV"
+          echo "Submitted: ${REQUEST_ID}"
+
+      - name: Poll for result
+        if: env.DRY_RUN != 'true'
+        run: |
+          set -euo pipefail
+          echo "Waiting for ${REQUEST_ID} ..."
+          for i in $(seq 1 360); do
+            sleep 5
+            resp=$(curl -sS --max-time 60 \
+              -H "x-api-key: ${MUAPI_API_KEY}" \
+              "${MUAPI_BASE}/api/v1/predictions/${REQUEST_ID}/result" || true)
+            status=$(printf '%s' "${resp}" | jq -r '.status // ""' 2>/dev/null || echo "")
+            echo "[$((i * 5))s] status=${status:-?}"
+            case "${status}" in
+              completed|succeeded|success)
+                printf '%s' "${resp}" > result.json
+                exit 0
+                ;;
+              failed|error|cancelled|canceled)
+                echo "::error::Generation failed"
+                printf '%s' "${resp}" | head -c 4000
+                exit 1
+                ;;
+            esac
+          done
+          echo "::error::Timed out after 30 minutes. Request ID: ${REQUEST_ID}"
+          exit 1
+
+      - name: Download video
+        if: env.DRY_RUN != 'true'
+        run: |
+          set -euo pipefail
+          VIDEO_URL=$(jq -r '
+            (.outputs[0]? // empty)
+            | if type == "object"
+              then (.url // .video_url // .video // "" )
+              else . end' result.json)
+          if [ -z "${VIDEO_URL}" ] || [ "${VIDEO_URL}" = "null" ]; then
+            VIDEO_URL=$(jq -r '.url // .output.url // .outputs_url // empty' result.json)
+          fi
+          if [ -z "${VIDEO_URL}" ] || [ "${VIDEO_URL}" = "null" ]; then
+            echo "::error::No video URL in result"
+            head -c 4000 result.json
+            exit 1
+          fi
+          echo "VIDEO_URL=${VIDEO_URL}" >> "$GITHUB_ENV"
+
+          MODEL=$(jq -r '.model' request.json)
+          SLUG=$(printf '%s' "${MODEL}" | tr -c 'a-zA-Z0-9._-' '-' | cut -c1-60)
+          NAME="$(date -u +%Y%m%d-%H%M%S)-${SLUG}-${GITHUB_RUN_ID}"
+          echo "NAME=${NAME}" >> "$GITHUB_ENV"
+
+          mkdir -p out
+          curl -sSL --max-time 900 -o "out/${NAME}.mp4" "${VIDEO_URL}"
+          ls -lh "out/${NAME}.mp4"
+          if [ ! -s "out/${NAME}.mp4" ]; then
+            echo "::error::Downloaded file is empty"
+            exit 1
+          fi
+
+          jq -n \
+            --arg name "${NAME}" \
+            --arg url "${VIDEO_URL}" \
+            --arg request_id "${REQUEST_ID}" \
+            --arg prompt "$(jq -r '.prompt' request.json)" \
+            --arg model "${MODEL}" \
+            --arg run "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            '{name:$name, file:("generated/" + $name + ".mp4"), source_url:$url,
+              request_id:$request_id, prompt:$prompt, model:$model, run:$run}' \
+            > "out/${NAME}.json"
+
+      - name: Publish to media branch
+        if: env.DRY_RUN != 'true'
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if git fetch --depth=1 origin media 2>/dev/null; then
+            git checkout -B media FETCH_HEAD
+          else
+            git checkout --orphan media
+            git rm -rf . >/dev/null 2>&1 || true
+            find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+            echo "# Generated media" > README.md
+          fi
+
+          mkdir -p generated
+          cp "out/${NAME}.mp4" "generated/${NAME}.mp4"
+          cp "out/${NAME}.json" "generated/${NAME}.json"
+
+          git add generated README.md
+          git commit -m "video: ${NAME}" || echo "nothing to commit"
+          git remote set-url origin "https://x-access-token:${GITHUB_TOKEN_ACTIONS}@github.com/${GITHUB_REPOSITORY}.git"
+          git push origin media
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Video generation"
+            echo ""
+            echo "- model: \`$(jq -r '.model' request.json 2>/dev/null || echo '?') \`"
+            echo "- request: \`${REQUEST_ID:-none}\`"
+            echo "- output: \`media:generated/${NAME:-none}.mp4\`"
+            echo "- source url: ${VIDEO_URL:-none}"
+            if [ "${DRY_RUN:-false}" = "true" ]; then
+              echo ""
+              echo "**Dry run:** ключ принят, генерация не запускалась, кредиты не потрачены."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

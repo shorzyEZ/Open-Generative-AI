@@ -1,0 +1,212 @@
+name: MPT reel
+
+# MoneyPrinterTurbo в GitHub Actions: свой видеоряд + русский сценарий + Edge TTS + субтитры.
+# Не требует ни локальной установки, ни ключей LLM/Pexels — всё на бесплатном раннере.
+#
+#   Actions -> MPT reel -> Run workflow
+# либо пуш файла mpt/jobs/*.json
+
+on:
+  workflow_dispatch:
+    inputs:
+      job_file:
+        description: "Файл задания"
+        required: false
+        default: "mpt/jobs/gym-motivation.json"
+        type: string
+  push:
+    paths:
+      - "mpt/jobs/*.json"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mpt-reel
+  cancel-in-progress: false
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      GITHUB_TOKEN_ACTIONS: ${{ github.token }}
+      INPUT_JOB_FILE: ${{ inputs.job_file }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: System deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg fonts-dejavu > /dev/null
+          ffmpeg -version | head -1
+
+      - name: Resolve job
+        run: |
+          set -euo pipefail
+          FILE="${INPUT_JOB_FILE:-}"
+          if [ -z "${FILE}" ] || [ "${GITHUB_EVENT_NAME}" != "workflow_dispatch" ]; then
+            FILE=$(git show --name-only --pretty=format: HEAD | grep -E '^mpt/jobs/.*\.json$' | head -n1 || true)
+          fi
+          [ -n "${FILE}" ] || FILE="mpt/jobs/gym-motivation.json"
+          echo "job: ${FILE}"
+          test -f "${FILE}" || { echo "::error::Нет файла задания ${FILE}"; exit 1; }
+          cp "${FILE}" job.json
+          jq -e . job.json > /dev/null || { echo "::error::job.json — невалидный JSON"; exit 1; }
+          cat job.json
+          NAME=$(jq -r '.name // "reel"' job.json)
+          echo "NAME=${NAME}" >> "$GITHUB_ENV"
+
+      - name: Clone MoneyPrinterTurbo
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/harry0703/MoneyPrinterTurbo.git mpt-src
+          cd mpt-src
+          git log -1 --format='MPT commit: %h %s'
+
+      - name: Install MPT deps
+        run: |
+          set -euo pipefail
+          cd mpt-src
+          python -m pip install --quiet --upgrade pip
+          python -m pip install --quiet -r requirements.txt
+          python -c "import moviepy, edge_tts, toml; print('deps ok')"
+
+      - name: Configure
+        run: |
+          set -euo pipefail
+          cd mpt-src
+          cp config.example.toml config.toml
+          # субтитры по таймкодам Edge TTS (Whisper не скачивается), источник — локальные файлы
+          sed -i 's/^subtitle_provider.*/subtitle_provider = "edge"/' config.toml
+          sed -i 's/^video_source.*/video_source = "local"/' config.toml
+          grep -E '^(subtitle_provider|video_source)' config.toml
+
+      - name: Render reel
+        run: |
+          set -euo pipefail
+          cd mpt-src
+          SCRIPT=$(jq -r '.script' ../job.json)
+          SUBJECT=$(jq -r '.subject // .name' ../job.json)
+          VOICE=$(jq -r '.voice // "ru-RU-DmitryNeural-Male"' ../job.json)
+          ASPECT=$(jq -r '.aspect // "9:16"' ../job.json)
+          LANG=$(jq -r '.language // "ru-RU"' ../job.json)
+          FONT_SIZE=$(jq -r '.font_size // 70' ../job.json)
+          MOTION=$(jq -r '.image_motion // "zoom"' ../job.json)
+          POSITION=$(jq -r '.subtitle_position // "bottom"' ../job.json)
+
+          # все наши картинки -> абсолютные пути через запятую
+          PAT=$(jq -r '.materials // "mpt-materials/*.png"' ../job.json)
+          MATERIALS=$(ls ${GITHUB_WORKSPACE}/${PAT} 2>/dev/null | sort | paste -sd, -)
+          [ -n "${MATERIALS}" ] || { echo "::error::Не найдены материалы по шаблону"; exit 1; }
+          echo "материалов: $(echo "${MATERIALS}" | tr ',' '\n' | wc -l)"
+          echo "${MATERIALS}" | tr ',' '\n'
+
+          mkdir -p ../out
+          python cli.py \
+            --video-subject "${SUBJECT}" \
+            --video-script "${SCRIPT}" \
+            --video-source local \
+            --video-materials "${MATERIALS}" \
+            --video-aspect "${ASPECT}" \
+            --video-language "${LANG}" \
+            --voice-name "${VOICE}" \
+            --video-count 1 \
+            --image-motion "${MOTION}" \
+            --subtitle-enabled \
+            --font-name "STHeitiMedium.ttc" \
+            --font-size "${FONT_SIZE}" \
+            --subtitle-position "${POSITION}" \
+            --subtitle-display-mode "sentence" \
+            --stop-at "video" 2>&1 | tee ../mpt.log
+          STATUS=${PIPESTATUS[0]}
+          if [ "${STATUS}" -ne 0 ]; then
+            echo "::error::MPT CLI exit=${STATUS}"
+            grep -aE "ERROR|Traceback|task failed|failed to|Error:" ../mpt.log | tail -8 | while IFS= read -r line; do
+              echo "::error::${line:0:400}"
+            done
+            exit 1
+          fi
+
+          VIDEO=$(find storage/tasks -name "final-*.mp4" -newermt '-30 minutes' | head -n1)
+          [ -n "${VIDEO}" ] || VIDEO=$(find storage/tasks -name "final-*.mp4" | head -n1)
+          [ -n "${VIDEO}" ] || { echo "::error::MPT не вернул final-*.mp4"; find storage/tasks -name '*.mp4' | head; exit 1; }
+          echo "видео: ${VIDEO}"
+          cp "${VIDEO}" "../out/${NAME}.mp4"
+          ls -lh "../out/${NAME}.mp4"
+          ffprobe -v error -show_entries format=duration:stream=width,height \
+            -of default=noprint_wrappers=1 "../out/${NAME}.mp4"
+
+      - name: Publish to media branch
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git fetch --depth=1 origin media 2>/dev/null; then
+            git checkout -B media FETCH_HEAD
+          else
+            git checkout --orphan media
+            find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+            echo "# Generated media" > README.md
+          fi
+          mkdir -p generated
+          cp "out/${NAME}.mp4" "generated/${NAME}.mp4"
+          jq -n --arg name "${NAME}" --arg run "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+                --slurpfile j job.json \
+                '{name:$name, file:("generated/"+$name+".mp4"), run:$run, job:$j[0]}' \
+                > "generated/${NAME}.json"
+          git add generated README.md
+          git commit -m "mpt: ${NAME}" || echo "nothing to commit"
+          git remote set-url origin "https://x-access-token:${GITHUB_TOKEN_ACTIONS}@github.com/${GITHUB_REPOSITORY}.git"
+          git push origin media
+
+      - name: Publish log on failure
+        if: failure()
+        run: |
+          set -uo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git fetch --depth=1 origin media 2>/dev/null; then
+            git checkout -B media FETCH_HEAD
+          else
+            git checkout --orphan media
+            find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+            echo "# Generated media" > README.md
+          fi
+          mkdir -p generated
+          {
+            echo "run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo "job: $(jq -c . job.json 2>/dev/null || echo '?')"
+            echo "--- mpt.log (tail 200) ---"
+            tail -200 mpt.log 2>/dev/null || echo "(mpt.log отсутствует)"
+          } > "generated/${NAME:-reel}.log"
+          git add generated README.md
+          git commit -m "mpt: log for ${NAME:-reel} (failed)" || true
+          git remote set-url origin "https://x-access-token:${GITHUB_TOKEN_ACTIONS}@github.com/${GITHUB_REPOSITORY}.git"
+          git push origin media || true
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## MPT reel: ${NAME:-?}"
+            echo ""
+            echo "- файл: \`media:generated/${NAME:-?}.mp4\`"
+            echo "- задание: \`$(jq -c '{voice,aspect,language,font_size}' job.json 2>/dev/null || echo '?')\`"
+            echo ""
+            if [ -f mpt.log ]; then
+              echo "<details><summary>Хвост лога MPT</summary>"
+              echo ""
+              echo '```'
+              tail -40 mpt.log
+              echo '```'
+              echo "</details>"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
