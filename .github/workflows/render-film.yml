@@ -1,0 +1,169 @@
+name: Render film
+
+# Генеративное кино из кода: сид -> поток частиц -> mp4 со синтезированным звуком.
+# Ни API-ключей, ни GPU, ни установки — только numpy + pillow + ffmpeg на раннере.
+#
+#   Actions -> Render film -> Run workflow
+#
+# Или пушем файла: films/<name>.json
+
+on:
+  workflow_dispatch:
+    inputs:
+      seed:
+        description: "Сид (любое число = другой фильм)"
+        required: false
+        default: "7"
+        type: string
+      palette:
+        description: "Палитра"
+        required: false
+        default: "ember"
+        type: choice
+        options: [ember, ink, neon, moss, bone]
+      seconds:
+        description: "Длительность, сек"
+        required: false
+        default: "8"
+        type: string
+      fps:
+        description: "Кадров в секунду"
+        required: false
+        default: "24"
+        type: string
+      width:
+        description: "Ширина"
+        required: false
+        default: "1280"
+        type: string
+      height:
+        description: "Высота"
+        required: false
+        default: "720"
+        type: string
+      particles:
+        description: "Частиц (больше = плотнее)"
+        required: false
+        default: "3000"
+        type: string
+      audio:
+        description: "Синтезировать саундтрек"
+        required: false
+        default: true
+        type: boolean
+  push:
+    paths:
+      - "films/*.json"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: render-film
+  cancel-in-progress: false
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GITHUB_TOKEN_ACTIONS: ${{ github.token }}
+      INPUT_SEED: ${{ inputs.seed }}
+      INPUT_PALETTE: ${{ inputs.palette }}
+      INPUT_SECONDS: ${{ inputs.seconds }}
+      INPUT_FPS: ${{ inputs.fps }}
+      INPUT_WIDTH: ${{ inputs.width }}
+      INPUT_HEIGHT: ${{ inputs.height }}
+      INPUT_PARTICLES: ${{ inputs.particles }}
+      INPUT_AUDIO: ${{ inputs.audio }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install deps
+        run: |
+          python -m pip install --quiet --upgrade pip
+          python -m pip install --quiet numpy pillow imageio-ffmpeg
+          python -c "import numpy, PIL, imageio_ffmpeg; print('deps ok')"
+
+      - name: Build params
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            jq -n --arg seed "${INPUT_SEED:-7}" --arg palette "${INPUT_PALETTE:-ember}" \
+                  --arg seconds "${INPUT_SECONDS:-8}" --arg fps "${INPUT_FPS:-24}" \
+                  --arg width "${INPUT_WIDTH:-1280}" --arg height "${INPUT_HEIGHT:-720}" \
+                  --arg particles "${INPUT_PARTICLES:-3000}" \
+                  --argjson audio "${INPUT_AUDIO:-true}" \
+              '{seed:$seed, palette:$palette, seconds:$seconds, fps:$fps,
+                width:$width, height:$height, particles:$particles, audio:$audio}' > film.json
+          else
+            file=$(git show --name-only --pretty=format: HEAD | grep -E '^films/.*\.json$' | head -n1 || true)
+            [ -n "${file}" ] || { echo "::error::Нет films/*.json в коммите"; exit 1; }
+            cp "${file}" film.json
+          fi
+          cat film.json
+          NAME=$(jq -r '.name // empty' film.json)
+          if [ -z "${NAME}" ]; then
+            NAME="seed$(jq -r '.seed' film.json)-$(jq -r '.palette' film.json)-${GITHUB_RUN_NUMBER}"
+          fi
+          echo "NAME=${NAME}" >> "$GITHUB_ENV"
+
+      - name: Render
+        run: |
+          set -euo pipefail
+          ARGS="--seed $(jq -r '.seed' film.json) \
+            --palette $(jq -r '.palette' film.json) \
+            --seconds $(jq -r '.seconds' film.json) \
+            --fps $(jq -r '.fps' film.json) \
+            --width $(jq -r '.width' film.json) \
+            --height $(jq -r '.height' film.json) \
+            --particles $(jq -r '.particles' film.json) \
+            --out out/${NAME}.mp4 --poster out/${NAME}.png"
+          if [ "$(jq -r '.audio' film.json)" = "true" ]; then ARGS="${ARGS} --audio"; fi
+          mkdir -p out
+          python generative/flowfilm.py ${ARGS}
+          ls -lh out/
+          ffprobe -v error -show_entries format=duration -of csv=p=0 "out/${NAME}.mp4" \
+            && echo "duration ok"
+
+      - name: Publish to media branch
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git fetch --depth=1 origin media 2>/dev/null; then
+            git checkout -B media FETCH_HEAD
+          else
+            git checkout --orphan media
+            find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+            echo "# Generated media" > README.md
+          fi
+          mkdir -p generated
+          cp "out/${NAME}.mp4" "generated/${NAME}.mp4"
+          cp "out/${NAME}.png" "generated/${NAME}.png"
+          jq -n --arg name "${NAME}" --arg run "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+                --slurpfile p film.json \
+                '{name:$name, film:"generated/"+$name+".mp4", poster:"generated/"+$name+".png",
+                  run:$run, params:$p[0]}' > "generated/${NAME}.json"
+          git add generated README.md
+          git commit -m "film: ${NAME}" || echo "nothing to commit"
+          git remote set-url origin "https://x-access-token:${GITHUB_TOKEN_ACTIONS}@github.com/${GITHUB_REPOSITORY}.git"
+          git push origin media
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Film: ${NAME:-?}"
+            echo ""
+            echo "- mp4: \`media:generated/${NAME:-?}.mp4\`"
+            echo "- poster: \`media:generated/${NAME:-?}.png\`"
+            echo "- params: \`$(jq -c . film.json 2>/dev/null || echo '?')\`"
+          } >> "$GITHUB_STEP_SUMMARY"

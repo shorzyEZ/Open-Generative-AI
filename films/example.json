@@ -1,0 +1,12 @@
+{
+  "_comment": "Скопируйте в films/<имя>.json и запушьте — фильм отрендерится в Actions. Любое изменение seed = другой фильм.",
+  "name": "my-first-film",
+  "seed": 21,
+  "palette": "ink",
+  "seconds": 8,
+  "fps": 24,
+  "width": 1280,
+  "height": 720,
+  "particles": 3000,
+  "audio": true
+}
