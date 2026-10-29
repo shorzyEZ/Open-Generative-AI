@@ -275,8 +275,10 @@ def save_poster(seed, palette, width, height, particles, out_path, settle=90):
     """Один кадр в высоком разрешении — «отпечаток» фильма."""
     frames = render(seed, palette, seconds=settle / 24, fps=24, width=width,
                     height=height, particles=particles)
+    # берём самый насыщенный кадр, а не последний (в конце fade-out -> чёрный)
+    best = max(frames, key=lambda a: int(a.mean()))
     os.makedirs(os.path.dirname(os.path.abspath(out_path)) or ".", exist_ok=True)
-    Image.fromarray(frames[-1]).save(out_path)
+    Image.fromarray(best).save(out_path)
     return out_path
 
 
